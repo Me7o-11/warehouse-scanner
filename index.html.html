@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#000000">
+<title>Warehouse Scanner</title>
+<!--
+  Live barcode scanner for the warehouse web app.
+  The app opens this page in a new tab, the camera reads one code, and the page sends
+  the code back to the app tab and closes. It holds no data and talks to no server.
+  It exists because Google's page around an Apps Script web app blocks the camera.
+-->
+<style>
+  :root { --bg:#000; --ink:#fff; --muted:#b8bcc4; --line:#3a3d44; --accent:#4cc3d9; --warn:#f0b44a; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; }
+  header { padding:14px 16px 8px; }
+  h1 { margin:0; font-size:17px; font-weight:600; }
+  #msg { margin:4px 0 0; color:var(--muted); font-size:14px; white-space:pre-line; overflow-wrap:anywhere; }
+  #msg.warn { color:var(--warn); }
+  #view { flex:1; min-height:0; position:relative; overflow:hidden; }
+  #reader { width:100%; height:100%; }
+  #reader video { width:100% !important; height:100% !important; object-fit:cover; }
+  #result { display:none; padding:24px 16px; text-align:center; }
+  #result.on { display:block; }
+  #code { font:600 28px/1.2 ui-monospace, Consolas, monospace; margin:10px 0 16px; overflow-wrap:anywhere; }
+  footer { display:flex; gap:10px; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  button { flex:1; min-height:52px; border-radius:12px; border:1px solid var(--line); background:#16181c;
+    color:var(--ink); font:600 16px system-ui, sans-serif; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#00262e; }
+  button[hidden] { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Scan a barcode or QR code</h1>
+  <p id="msg" role="status">Starting camera…</p>
+</header>
+<div id="view"><div id="reader"></div></div>
+<div id="result"><div>Scanned code</div><div id="code"></div>
+  <button class="primary" id="copy" type="button">Copy code</button></div>
+<input type="file" id="file" accept="image/*" capture="environment" hidden>
+<footer>
+  <button id="photo" type="button">Take a photo</button>
+  <button id="cancel" type="button">Back to app</button>
+</footer>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+'use strict';
+var nonce = (location.hash.match(/[#&]n=([\w-]{1,64})/) || [])[1] || '';
+var reader = null, sent = false;
+
+function $(id) { return document.getElementById(id); }
+function say(text, warn) { $('msg').textContent = text; $('msg').className = warn ? 'warn' : ''; }
+function hasApp() { try { return !!(window.opener && !window.opener.closed); } catch (e) { return false; } }
+function stop() {
+  var r = reader; reader = null;
+  if (!r) return Promise.resolve();
+  var clear = function () { try { r.clear(); } catch (e) {} };
+  try { return Promise.resolve(r.stop()).then(clear, clear); } catch (e) { clear(); return Promise.resolve(); }
+}
+
+// Sends the code to the app tab that opened this page, then closes.
+// Without an app tab, shows the code so it can be copied.
+function deliver(text) {
+  text = String(text || '').trim();
+  if (!text || sent) return;
+  sent = true;
+  if (navigator.vibrate) try { navigator.vibrate(60); } catch (e) {}
+  stop();
+  if (hasApp()) {
+    window.opener.postMessage({ type: 'wms-scan', text: text, nonce: nonce }, '*');
+    say('Sent ' + text + ' to the app.');
+    setTimeout(function () {
+      window.close();
+      // Some browsers keep the tab open; tell the worker where to go.
+      setTimeout(function () { say('Sent ' + text + '. Switch back to the app tab.'); }, 300);
+    }, 150);
+  } else {
+    $('view').style.display = 'none';
+    $('code').textContent = text;
+    $('result').className = 'on';
+    say('This tab is not connected to the app. Copy the code and paste it into the app.', true);
+  }
+}
+
+function start() {
+  if (typeof Html5Qrcode === 'undefined') { say('The scanner could not load. Check the internet connection, or take a photo.', true); return; }
+  reader = new Html5Qrcode('reader');
+  reader.start({ facingMode: 'environment' },
+    { fps: 12, qrbox: function (w, h) { return { width: Math.floor(w * 0.86), height: Math.floor(Math.min(h * 0.6, w * 0.6)) }; } },
+    deliver, function () {}
+  ).then(function () {
+    say(hasApp() ? 'Point the camera at the code. The app gets it automatically.'
+                 : 'Point the camera at the code.');
+  }).catch(function (e) {
+    var why = String((e && e.message) || e);
+    say(/NotAllowed|Permission/i.test(why)
+      ? 'Camera is blocked for this page. Tap the icon left of the address bar > Permissions > Camera > Allow, then reload. Or take a photo.'
+      : 'Live camera is not available (' + why + '). Take a photo instead.', true);
+  });
+}
+
+$('photo').addEventListener('click', function () { $('file').value = ''; $('file').click(); });
+$('file').addEventListener('change', function () {
+  var f = this.files && this.files[0];
+  if (!f) return;
+  say('Reading photo…');
+  stop().then(function () {
+    var r = new Html5Qrcode('reader');
+    return r.scanFile(f, false).then(function (t) { try { r.clear(); } catch (e) {} return t; });
+  }).then(deliver, function () {
+    say('No code found in that photo. Hold the phone closer, keep the code flat and well lit, then try again.', true);
+    if (!sent) start();
+  });
+});
+$('cancel').addEventListener('click', function () {
+  stop();
+  if (hasApp()) window.opener.postMessage({ type: 'wms-scan-cancel', nonce: nonce }, '*');
+  window.close();
+  setTimeout(function () { say('You can close this tab and switch back to the app.'); }, 300);
+});
+$('copy').addEventListener('click', function () {
+  var t = $('code').textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(
+    function () { say('Copied. Paste it into the app.'); },
+    function () { say('Press and hold the code to copy it.', true); });
+});
+window.addEventListener('pagehide', stop);
+start();
+</script>
+</body>
+</html>
